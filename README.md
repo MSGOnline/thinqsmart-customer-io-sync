@@ -1,212 +1,94 @@
-# ThinQsmart → Customer.io Real-Time Order Sync
+# ThinQsmart → Customer.io order-sync
 
-Automatically sync orders from your ThinQsmart MySQL database to Customer.io in real-time using Vercel KV.
+Synchroniseert nieuwe orders uit de ThinQsmart MySQL-replica naar Customer.io, zodat klanten uit de gemeente Amsterdam automatisch een mail krijgen.
 
-**✅ ZERO database changes — completely read-only!**  
-**✅ Gemeente filter — only Amsterdam orders**  
-**✅ Email filtering — exclude specific addresses**
+De database wordt **alleen gelezen**. Geen tabellen, geen triggers, geen schemawijzigingen.
 
-## What This Does
+## Hoe het werkt
 
-✅ New order inserted in ThinQsmart  
-↓ Vercel cron checks every 1 minute  
-↓ Polls `msg_orders` since last processed ID (stored in Vercel KV)  
-↓ Filter: Is plaats in Amsterdam gemeente? → YES: continue, NO: skip  
-↓ Filter: Is email in excluded list? → YES: skip, NO: send  
-↓ Sends customer data to Customer.io with location (`plaats`)  
-✅ Customer.io email automation triggers  
+1. Het endpoint `/api/webhook-processor` wordt aangeroepen (handmatig, door cron, of door een externe scheduler).
+2. Het leest uit Upstash/Vercel KV welk order-ID het laatst is verwerkt.
+3. Het haalt de orders op met een hoger ID (max 50 per run).
+4. Per order: staat `plaats` in `GEMEENTE_PLACES`? Zo niet → skip. Staat het e-mailadres in `EXCLUDE_EMAILS`? Zo ja → skip.
+5. Wat overblijft gaat via de Customer.io **Track API** naar de workspace, met `plaats`, `webshop` en `sync_date` als attributen.
+6. Het hoogste verwerkte order-ID gaat terug in KV.
+7. In Customer.io triggert een automation op die attributen de mail.
 
-## Architecture
+## Bestanden
 
-```
-MySQL Replica (read-only)
-    ├─ msg_orders (read only)
-    ├─ msg_customers (read only)
-    ├─ msg_addresses (read only)
-    ↓ [Vercel cron every 1 min]
-Vercel Serverless Function
-    ├─ Query: SELECT orders WHERE id > last_processed_id
-    ├─ Filter 1: Is plaats in Amsterdam?
-    ├─ Filter 2: Is email excluded?
-    ├─ Send to Customer.io
-    ├─ Update last_processed_id IN VERCEL KV
-    ↓
-Customer.io
-    └─ Email automation triggers
-```
+| Bestand | Doel |
+|---|---|
+| `api/webhook-processor.js` | De sync zelf |
+| `api/debug.js` | Laat zien welke environment variables de functie ziet. Weghalen zodra alles werkt. |
+| `package.json` | Dependencies, Node 24 |
+| `.env.example` | Alle variabelen met uitleg |
+| `SETUP_GUIDE.md` | Stap voor stap installeren |
 
-## Key Features
+Er zit **geen `vercel.json`** in. Vercel detecteert de `api/`-map automatisch. Een `vercel.json` met een cron erin wordt op het Hobby-plan geweigerd, en dat blokkeert je hele deployment.
 
-- **Zero database changes:** Read-only on your database. Completely safe.
-- **Gemeente filter:** Only sync orders from Amsterdam (Amsterdam, Weesp, Noord, West, Oost, Zuid, Zuidoost)
-- **Email filtering:** Exclude specific addresses (e.g., admin emails)
-- **Vercel KV state tracking:** No database tables needed
-- **Real-time (1 min delay):** Cron-based polling
-- **Reliable:** KV-based state prevents duplicates and handles gaps
-- **Cost-effective:** Minimal Vercel credits, serverless scaling
-- **Safe for others:** No impact on other database users
-- **Easy to expand:** Change gemeente places or emails with just env vars
+## Environment variables
 
-## Files Included
+Zie `.env.example` voor de volledige lijst met uitleg. De drie waar het meestal op misgaat:
 
-| File | Purpose |
-|------|---------|
-| `api/webhook-processor.js` | Main serverless function (gemeente + email filtering) |
-| `package.json` | Node.js dependencies |
-| `vercel.json` | Vercel deployment config with cron |
-| `.env.example` | Environment variables template |
-| `SETUP_GUIDE.md` | Complete step-by-step setup instructions |
-| `README.md` | This file |
+**`CUSTOMER_IO_SITE_ID` en `CUSTOMER_IO_TRACK_API_KEY`** komen uit Settings → Account Settings → API Credentials → **Track API Keys**. Dit zijn niet dezelfde sleutels als de App API key. Ze zijn ook per workspace verschillend, dus selecteer eerst de juiste workspace.
 
-## Quick Start
+**`CUSTOMER_IO_REGION`** moet `eu` zijn voor dit account. Een EU-workspace praat met `track-eu.customer.io`; stuur je naar de US-URL, dan krijg je een authenticatiefout die eruitziet als een verkeerde sleutel.
 
-1. **Get Customer.io credentials:**
-   - Go to Settings → API Credentials
-   - Copy Account ID and API Key
+**`START_FROM_ORDER_ID`** is je beveiliging tegen een ongeluk. Is de KV-store leeg en staat deze variabele niet ingevuld, dan begint de sync bij order-ID 0 en werkt hij zich door je oudste orders heen — inclusief mails naar klanten van jaren terug. Zet hem op het hoogste order-ID dat nu in de database staat:
 
-2. **Deploy to Vercel:**
-   - Push code to GitHub
-   - Import to Vercel
-   - Create Vercel KV store
-   - Add environment variables (Customer.io credentials + filters)
-   - Deploy
-
-3. **Set up email in Customer.io:**
-   - Create automation triggered by `plaats` attribute
-   - Test with a real order
-
-See `SETUP_GUIDE.md` for detailed instructions.
-
-## Configuration
-
-### Environment Variables
-
-```
-# Database
-DB_HOST                          # MySQL host
-DB_USER                          # MySQL username
-DB_PASSWORD                      # MySQL password
-DB_NAME                          # ThinQsmart database name
-
-# Customer.io
-CUSTOMER_IO_ACCOUNT_ID           # From Customer.io settings
-CUSTOMER_IO_API_KEY              # From Customer.io settings
-
-# Gemeente filter (only these places sync)
-GEMEENTE_PLACES=Amsterdam,Weesp,Amsterdam-Noord,Amsterdam-West,Amsterdam-Oost,Amsterdam-Zuid,Amsterdam-Zuidoost
-
-# Email filtering (never send these)
-EXCLUDE_EMAILS=planning@thcontainers.nl,planning@paridoncontainers.nl,info@milieuservice.nl
-
-# Security
-WEBHOOK_SECRET                   # Random token for webhook
-KV_REST_API_URL                  # Auto-added by Vercel KV
-KV_REST_API_TOKEN                # Auto-added by Vercel KV
+```sql
+SELECT MAX(id) FROM msg_orders WHERE company_id = 1;
 ```
 
-### Cron Schedule
+## Testen zonder te mailen
 
-Default: Every 1 minute (`*/1 * * * *`)
+Zet `DRY_RUN=true`. De functie doorloopt dan alles, past alle filters toe en rapporteert per order wat hij zou doen, maar stuurt niets naar Customer.io. De response bevat dan `"dry_run": true` en een `would_send`-teller in plaats van `processed`.
 
-Edit in `vercel.json` to change frequency. Note: Cron requires Vercel Pro plan.
+Let op: ook in dry-run wordt het laatst verwerkte ID in KV bijgewerkt. Wil je dezelfde orders opnieuw testen, verlaag dan de KV-waarde `thinqsmart:last_processed_order_id` (Storage → je database → Data Browser).
 
-## Data Synced to Customer.io
+Handmatig aanroepen:
 
-Each customer gets these custom fields:
-- `plaats` — City/location of delivery
-- `webshop` — Which webshop made the order
-- `sync_date` — When the sync happened
-
-## Changing Gemeente Filter
-
-To change which places are included, edit Vercel environment:
-```
-GEMEENTE_PLACES=Amsterdam,Weesp,Amsterdam-Noord,Amsterdam-West,Amsterdam-Oost,Amsterdam-Zuid,Amsterdam-Zuidoost,Diemen
-```
-
-Then deploy.
-
-## Excluding More Emails
-
-```
-EXCLUDE_EMAILS=planning@thcontainers.nl,admin@thcontainers.nl,support@company.nl
-```
-
-Then deploy.
-
-## Monitoring
-
-**Check sync status:**
-```
-Vercel Dashboard → Storage → KV → your-store
-Key: thinqsmart:last_processed_order_id
-```
-
-**View Vercel logs:**
-```
-Vercel Dashboard → Deployments → Logs
-```
-
-**Manual test:**
 ```bash
-curl "https://your-project.vercel.app/api/webhook-processor?secret=YOUR_SECRET"
+curl "https://jouw-project.vercel.app/api/webhook-processor?secret=JOUW_SECRET"
 ```
 
-**Response example:**
+Controleren welke variabelen aankomen:
+
+```bash
+curl "https://jouw-project.vercel.app/api/debug"
+```
+
+## Automatisch laten draaien
+
+Op het **Hobby-plan** mag een cron maximaal één keer per dag draaien. Voor "direct een mail na een bestelling" is dat te weinig. Twee opties:
+
+**Vercel Pro, $20/maand.** Voeg een `vercel.json` toe:
+
 ```json
 {
-  "success": true,
-  "processed": 3,
-  "skipped": 2,
-  "failed": 0,
-  "details": [
-    {"order_id": 127941, "plaats": "Amsterdam", "status": "success"},
-    {"order_id": 127940, "plaats": "Rotterdam", "status": "skipped", "reason": "plaats_not_in_gemeente"},
-    {"order_id": 127940, "email": "planning@thcontainers.nl", "status": "skipped", "reason": "email_excluded"}
+  "crons": [
+    { "path": "/api/webhook-processor?secret=JOUW_SECRET", "schedule": "*/1 * * * *" }
   ]
 }
 ```
 
-## Troubleshooting
+**Externe scheduler, gratis.** Laat bijvoorbeeld cron-job.org of een Make-scenario elke minuut de URL aanroepen. Je blijft dan op Hobby. Je hebt Make al in gebruik, en één HTTP-call per minuut kost daar minder credits dan de database uitlezen.
 
-- **No orders syncing?** Check Vercel logs and KV key status
-- **"Plaats not in gemeente"?** The place is outside Amsterdam gemeente — add it to GEMEENTE_PLACES if needed
-- **Email should be excluded but isn't?** Check EXCLUDE_EMAILS (case-insensitive)
-- **API errors?** Verify Customer.io credentials in Vercel env vars
-- **Connection timeout?** Ensure MySQL host is correct and accessible
+## Wat er misging tijdens het opzetten
 
-See `SETUP_GUIDE.md` for more troubleshooting steps.
+Bewaard, omdat het waarschijnlijk weer voorkomt:
 
-## Costs
+- **"Invalid vercel.json"** — een komma achter de laatste regel. JSON staat geen trailing comma toe.
+- **"Found invalid or discontinued Node.js Version 18.x"** — Vercel ondersteunt Node 18 niet meer. Staat nu op 24 in `package.json`.
+- **`ECONNREFUSED 127.0.0.1:3306`** — `DB_HOST` kwam niet aan, waardoor mysql2 terugvalt op localhost. Niet de database is het probleem, maar een env var die niet doorkomt.
+- **Env vars die wel in de UI staan maar MISSING zijn in de functie** — vaak leeg opgeslagen. Zet ze niet op "Sensitive" zolang je aan het opzetten bent, dan kun je de waarde teruglezen en controleren.
+- **Env var toegevoegd maar functie ziet hem niet** — een deployment krijgt alleen de variabelen die bestonden op het moment van bouwen. Na elke wijziging opnieuw deployen.
 
-| Service | Estimated Cost |
-|---------|-----------------|
-| Vercel (Hobby tier) | Free |
-| Vercel KV (included) | Free |
-| Vercel Pro (cron) | $20/month |
-| Customer.io API calls | ~$0 (included in plan) |
-| **Total** | Free or $20/month |
+## Kosten
 
-Alternative: Use free external cron service if staying on Vercel Hobby plan.
-
-## Database Impact
-
-✅ **ZERO changes to your database**
-
-- No SQL tables created
-- No triggers installed
-- No schema modifications
-- Completely read-only
-- Safe for other database users
-- No maintenance burden
-
-## Support
-
-- Vercel docs: https://vercel.com/docs
-- Vercel KV docs: https://vercel.com/docs/storage/vercel-kv
-- Customer.io docs: https://customer.io/docs/api/
-- MySQL docs: https://dev.mysql.com/doc/
-
----
-
-**Questions?** Check the SETUP_GUIDE.md or review the inline code comments in `api/webhook-processor.js`.
+| Onderdeel | Kosten |
+|---|---|
+| Vercel Hobby | gratis |
+| Upstash for Redis (free tier) | gratis |
+| Externe cron | gratis |
+| Vercel Pro (alleen voor ingebouwde cron) | $20/maand |

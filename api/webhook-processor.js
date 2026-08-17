@@ -27,9 +27,14 @@ function parseExcludedEmails() {
 
 const GEMEENTE_PLACES = parseGemeentePlaces();
 const EXCLUDED_EMAILS = parseExcludedEmails();
-const CUSTOMER_IO_ACCOUNT_ID = process.env.CUSTOMER_IO_ACCOUNT_ID;
-const CUSTOMER_IO_API_KEY = process.env.CUSTOMER_IO_API_KEY;
-const CUSTOMER_IO_BASE_URL = 'https://api.customer.io/v1/api';
+const DRY_RUN = String(process.env.DRY_RUN).toLowerCase() === 'true';
+const CUSTOMER_IO_SITE_ID = process.env.CUSTOMER_IO_SITE_ID;
+const CUSTOMER_IO_TRACK_API_KEY = process.env.CUSTOMER_IO_TRACK_API_KEY;
+// EU-workspaces gebruiken track-eu, US-workspaces track. Default EU.
+const CUSTOMER_IO_BASE_URL =
+  (process.env.CUSTOMER_IO_REGION || 'eu').toLowerCase() === 'us'
+    ? 'https://track.customer.io/api/v1'
+    : 'https://track-eu.customer.io/api/v1';
 
 // MySQL configuration (replica, read-only)
 const DB_CONFIG = {
@@ -52,14 +57,24 @@ async function initPool() {
   return pool;
 }
 
+// Startpunt als de KV-store nog leeg is.
+// ZONDER dit begint de sync bij order-ID 0 en mailt hij je hele orderhistorie.
+function getStartFromOrderId() {
+  const raw = process.env.START_FROM_ORDER_ID;
+  const parsed = parseInt(raw, 10);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
 // Get last processed order ID from Vercel KV
 async function getLastProcessedOrderId() {
   try {
     const lastId = await kv.get('thinqsmart:last_processed_order_id');
-    return lastId ? parseInt(lastId, 10) : 0;
+    if (lastId === null || lastId === undefined) return getStartFromOrderId();
+    const parsed = parseInt(lastId, 10);
+    return Number.isFinite(parsed) ? parsed : getStartFromOrderId();
   } catch (error) {
     console.error('Error getting last processed ID from KV:', error.message);
-    return 0;
+    throw error;
   }
 }
 
@@ -112,20 +127,20 @@ async function sendToCustomerIO(order) {
   const { email, plaats, webshop_name } = order;
 
   const auth = Buffer.from(
-    `${CUSTOMER_IO_ACCOUNT_ID}:${CUSTOMER_IO_API_KEY}`
+    `${CUSTOMER_IO_SITE_ID}:${CUSTOMER_IO_TRACK_API_KEY}`
   ).toString('base64');
 
+  // Track API v1: attributen staan op top-level, niet in custom_fields
   const payload = {
     email,
-    custom_fields: {
-      plaats: plaats || 'Onbekend',
-      webshop: webshop_name || 'Onbekend',
-      sync_date: new Date().toISOString(),
-    },
+    plaats: plaats || 'Onbekend',
+    webshop: webshop_name || 'Onbekend',
+    sync_date: new Date().toISOString(),
   };
 
   try {
-    const response = await fetch(`${CUSTOMER_IO_BASE_URL}/customers`, {
+    const url = `${CUSTOMER_IO_BASE_URL}/customers/${encodeURIComponent(email)}`;
+    const response = await fetch(url, {
       method: 'PUT',
       headers: {
         'Authorization': `Basic ${auth}`,
@@ -229,6 +244,13 @@ export default async function handler(req, res) {
 
         console.log(`Processing order ${order_id}: ${email} (${plaats})`);
 
+        // DRY_RUN=true: alles doorlopen en filteren, maar niets versturen
+        if (DRY_RUN) {
+          results.push({ order_id, email, plaats, status: 'dry_run' });
+          if (order_id > maxOrderId) maxOrderId = order_id;
+          continue;
+        }
+
         // Send to Customer.io
         await sendToCustomerIO(order);
 
@@ -261,12 +283,15 @@ export default async function handler(req, res) {
     }
 
     const successCount = results.filter(r => r.status === 'success').length;
+    const dryRunCount = results.filter(r => r.status === 'dry_run').length;
     const skippedCount = results.filter(r => r.status === 'skipped').length;
     const errorCount = results.filter(r => r.status === 'error').length;
 
     res.status(200).json({
       success: true,
+      dry_run: DRY_RUN,
       processed: successCount,
+      would_send: dryRunCount,
       skipped: skippedCount,
       failed: errorCount,
       total: results.length,
