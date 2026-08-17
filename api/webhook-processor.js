@@ -29,8 +29,8 @@ const GEMEENTE_PLACES = parseGemeentePlaces();
 const EXCLUDED_EMAILS = parseExcludedEmails();
 const DRY_RUN = String(process.env.DRY_RUN).toLowerCase() === 'true';
 
-// Waarom deze klant gemaild moet worden. Wordt gebruikt als
-// attribuutnaam op het profiel EN als waarde van event.data.extra.
+// Waarom deze klant gemaild moet worden. Gaat alleen mee als
+// event.data.extra, niet als attribuut op het profiel.
 // Komt er later een tweede gemeente of een ander soort mail bij,
 // dan geef je die een eigen waarde en blijven de flows gescheiden.
 const MAIL_EXTRA = process.env.MAIL_EXTRA || 'vergunning_amsterdam';
@@ -186,9 +186,6 @@ async function sendToCustomerIO(order) {
 
   const attributen = { email, plaats: plaats || 'Onbekend' };
   if (webshopAttribuut) attributen[webshopAttribuut] = true;
-  // Blijvende vlag op het profiel: deze klant valt onder de vergunningsmail.
-  // Handig om op te segmenteren en te zien wie ooit in deze groep zat.
-  attributen[MAIL_EXTRA] = true;
 
   const identifier = encodeURIComponent(email);
   await cioRequest(`/customers/${identifier}`, 'PUT', attributen);
