@@ -1,0 +1,22 @@
+{
+  "name": "thinqsmart-customer-io-sync",
+  "version": "1.0.0",
+  "description": "Real-time order sync from ThinQsmart MySQL to Customer.io via Vercel KV (no database changes)",
+  "main": "api/webhook-processor.js",
+  "type": "module",
+  "scripts": {
+    "dev": "vercel dev",
+    "build": "echo 'Build complete'",
+    "test": "node test-local.js"
+  },
+  "dependencies": {
+    "mysql2": "^3.6.5",
+    "@vercel/kv": "^0.2.1"
+  },
+  "devDependencies": {
+    "dotenv": "^16.3.1"
+  },
+  "engines": {
+    "node": "18.x"
+  }
+}

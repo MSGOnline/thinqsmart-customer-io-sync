@@ -1,0 +1,11 @@
+{
+  "buildCommand": "npm run build",
+  "devCommand": "npm run dev",
+  "outputDirectory": "./",
+  "crons": [
+    {
+      "path": "/api/webhook-processor?secret=YOUR_WEBHOOK_SECRET",
+      "schedule": "*/1 * * * *"
+    }
+  ]
+}
