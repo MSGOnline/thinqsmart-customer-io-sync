@@ -122,45 +122,79 @@ function isEmailExcluded(email) {
   return EXCLUDED_EMAILS.includes(email.toLowerCase());
 }
 
-// Send customer data to Customer.io
+// ============================================
+// Webshopnaam in ThinQsmart -> attribuutnaam in Customer.io
+// Sleutel links is lowercase, dat is alleen voor het opzoeken.
+// De waarde rechts is exact wat in Customer.io komt te staan.
+// Nieuwe webshop? Voeg hier een regel toe.
+// ============================================
+const WEBSHOP_ATTRIBUTEN = {
+  'puincontainershop.be': 'Puincontainershop.be',
+  'mdk containers': 'Mdkcontainers.nl',
+  'th containers': 'Thcontainers.nl',
+  'paridon containers': 'Paridoncontainers.nl',
+  'puincontainershop.nl': 'Puincontainershop.nl',
+  'containerhuren.nl': 'Containerhuren.nl',
+  'regiocontainer.nl': 'Regiocontainer.nl',
+  'praxis-kluscontainer.nl': 'Praxis-kluscontainer.nl',
+  'afvalcontainershop.nl': 'Afvalcontainershop.nl',
+};
+
+function mapWebshop(naam) {
+  if (!naam) return null;
+  return WEBSHOP_ATTRIBUTEN[naam.trim().toLowerCase()] || null;
+}
+
+function cioAuthHeader() {
+  return (
+    'Basic ' +
+    Buffer.from(
+      `${CUSTOMER_IO_SITE_ID}:${CUSTOMER_IO_TRACK_API_KEY}`
+    ).toString('base64')
+  );
+}
+
+async function cioRequest(path, method, body) {
+  const response = await fetch(`${CUSTOMER_IO_BASE_URL}${path}`, {
+    method,
+    headers: {
+      Authorization: cioAuthHeader(),
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Customer.io ${method} ${path}: ${response.status} - ${errorText}`);
+  }
+  return response.status;
+}
+
+// Stap 1: profiel bijwerken. Zet plaats en de true-vlag voor deze webshop.
+// Bestaande vlaggen van andere webshops blijven staan: een PUT werkt alleen
+// de meegestuurde velden bij en wist de rest niet.
 async function sendToCustomerIO(order) {
   const { email, plaats, webshop_name } = order;
+  const webshopAttribuut = mapWebshop(webshop_name);
 
-  const auth = Buffer.from(
-    `${CUSTOMER_IO_SITE_ID}:${CUSTOMER_IO_TRACK_API_KEY}`
-  ).toString('base64');
+  const attributen = { email, plaats: plaats || 'Onbekend' };
+  if (webshopAttribuut) attributen[webshopAttribuut] = true;
 
-  // Track API v1: attributen staan op top-level, niet in custom_fields
-  const payload = {
-    email,
-    plaats: plaats || 'Onbekend',
-    webshop: webshop_name || 'Onbekend',
-    sync_date: new Date().toISOString(),
-  };
+  const identifier = encodeURIComponent(email);
+  await cioRequest(`/customers/${identifier}`, 'PUT', attributen);
 
-  try {
-    const url = `${CUSTOMER_IO_BASE_URL}/customers/${encodeURIComponent(email)}`;
-    const response = await fetch(url, {
-      method: 'PUT',
-      headers: {
-        'Authorization': `Basic ${auth}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(payload),
-    });
+  // Stap 2: event sturen. Hierop triggert de flow, elke bestelling opnieuw.
+  await cioRequest(`/customers/${identifier}/events`, 'POST', {
+    name: 'bestelling_geplaatst',
+    data: {
+      order_id: order.order_id,
+      plaats: plaats || 'Onbekend',
+      webshop: webshopAttribuut || webshop_name || 'Onbekend',
+    },
+  });
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(
-        `Customer.io API error: ${response.status} - ${errorText}`
-      );
-    }
-
-    return { success: true, status: response.status };
-  } catch (error) {
-    console.error(`Failed to send to Customer.io:`, error.message);
-    throw error;
-  }
+  return { success: true, webshop_attribuut: webshopAttribuut };
 }
 
 // Update last processed order ID in Vercel KV
@@ -244,9 +278,26 @@ export default async function handler(req, res) {
 
         console.log(`Processing order ${order_id}: ${email} (${plaats})`);
 
+        const webshopAttribuut = mapWebshop(order.webshop_name);
+        if (!webshopAttribuut) {
+          // Geen match in de mapping: de klant en het event gaan wel door,
+          // maar er wordt geen true-vlag gezet. Zichtbaar in de response,
+          // zodat een nieuwe of hernoemde webshop niet stil verdwijnt.
+          console.warn(
+            `! Order ${order_id}: webshop "${order.webshop_name}" staat niet in WEBSHOP_ATTRIBUTEN`
+          );
+        }
+
         // DRY_RUN=true: alles doorlopen en filteren, maar niets versturen
         if (DRY_RUN) {
-          results.push({ order_id, email, plaats, status: 'dry_run' });
+          results.push({
+            order_id,
+            email,
+            plaats,
+            webshop_thinqsmart: order.webshop_name,
+            webshop_attribuut: webshopAttribuut,
+            status: 'dry_run',
+          });
           if (order_id > maxOrderId) maxOrderId = order_id;
           continue;
         }
@@ -258,6 +309,8 @@ export default async function handler(req, res) {
           order_id,
           email,
           plaats,
+          webshop_thinqsmart: order.webshop_name,
+          webshop_attribuut: webshopAttribuut,
           status: 'success',
         });
 

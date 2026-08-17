@@ -13,7 +13,8 @@ export default function handler(req, res) {
   }
   out.REGIO_EFFECTIEF = (process.env.CUSTOMER_IO_REGION || 'eu').toLowerCase();
   out.START_EFFECTIEF = Number.isFinite(parseInt(process.env.START_FROM_ORDER_ID, 10))
-    ? parseInt(process.env.START_FROM_ORDER_ID, 10) : 0;
+    ? parseInt(process.env.START_FROM_ORDER_ID, 10)
+    : 0;
   out.DRY_RUN_EFFECTIEF = String(process.env.DRY_RUN).toLowerCase() === 'true';
   res.status(200).json(out);
 }

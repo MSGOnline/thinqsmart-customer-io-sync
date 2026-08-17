@@ -10,9 +10,43 @@ De database wordt **alleen gelezen**. Geen tabellen, geen triggers, geen schemaw
 2. Het leest uit Upstash/Vercel KV welk order-ID het laatst is verwerkt.
 3. Het haalt de orders op met een hoger ID (max 50 per run).
 4. Per order: staat `plaats` in `GEMEENTE_PLACES`? Zo niet → skip. Staat het e-mailadres in `EXCLUDE_EMAILS`? Zo ja → skip.
-5. Wat overblijft gaat via de Customer.io **Track API** naar de workspace, met `plaats`, `webshop` en `sync_date` als attributen.
+5. Wat overblijft gaat via de Customer.io **Track API** naar de workspace, in twee aanroepen:
+   - `PUT /customers/{email}` met `plaats` en een `true`-vlag voor de webshop van deze order.
+   - `POST /customers/{email}/events` met event `bestelling_geplaatst`.
 6. Het hoogste verwerkte order-ID gaat terug in KV.
-7. In Customer.io triggert een automation op die attributen de mail.
+7. In Customer.io triggert een campagne op het event `bestelling_geplaatst` de mail.
+
+## Webshop-vlaggen
+
+Per webshop krijgt de klant een eigen attribuut op `true`, in plaats van één `webshop`-veld dat wordt overschreven. Iemand die bij twee shops bestelt, houdt beide vlaggen: een PUT werkt alleen de meegestuurde velden bij.
+
+De mapping staat bovenaan `api/webhook-processor.js` in `WEBSHOP_ATTRIBUTEN`. Links de naam zoals ThinQsmart hem heeft, rechts wat er in Customer.io komt te staan:
+
+| ThinQsmart | Customer.io |
+|---|---|
+| Puincontainershop.be | `Puincontainershop.be` |
+| MDK Containers | `Mdkcontainers.nl` |
+| TH Containers | `Thcontainers.nl` |
+| Paridon Containers | `Paridoncontainers.nl` |
+| Puincontainershop.nl | `Puincontainershop.nl` |
+| Containerhuren.nl | `Containerhuren.nl` |
+| Regiocontainer.nl | `Regiocontainer.nl` |
+| Praxis-Kluscontainer.nl | `Praxis-kluscontainer.nl` |
+| Afvalcontainershop.nl | `Afvalcontainershop.nl` |
+
+Staat een webshopnaam niet in de mapping, dan gaan de klant en het event alsnog door, maar zonder vlag. Je ziet dat in de response terug als `"webshop_attribuut": null`, zodat een nieuwe of hernoemde webshop niet stil verdwijnt.
+
+Let op bij het gebruiken van deze attributen in een e-mailtemplate: de punten in de naam breken Liquid. Gebruik blokhaken:
+
+```liquid
+{{customer["Puincontainershop.nl"]}}
+```
+
+## Waarom een event en niet alleen attributen
+
+Een campagne die triggert op "attribuut gewijzigd" gaat bij een tweede bestelling bij dezelfde shop niet opnieuw af: die `true` stond er al, dus er verandert niets aan het profiel. Daarom stuurt de sync per order ook een event `bestelling_geplaatst`, met `order_id`, `plaats` en `webshop` als data. Een campagne die op dat event triggert vuurt bij elke bestelling.
+
+Bouw de flow in Customer.io dus op het event, niet op een attribuut.
 
 ## Bestanden
 
