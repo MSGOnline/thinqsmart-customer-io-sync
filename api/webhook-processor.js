@@ -95,7 +95,8 @@ async function getUnprocessedOrders(lastProcessedId) {
         o.id AS order_id,
         w.name AS webshop_name,
         a.city AS plaats,
-        c.email AS email
+        c.email AS email,
+        c.nickname AS voornaam
       FROM msg_orders o
       LEFT JOIN msg_webshops w ON o.webshop_id = w.id
       LEFT JOIN msg_addresses a ON a.id = o.delivery_address_id
@@ -146,6 +147,16 @@ const WEBSHOP_ATTRIBUTEN = {
   'afvalcontainershop.nl': 'Afvalcontainershop.nl',
 };
 
+// De invoer in ThinQsmart is niet consistent: "helen" en "jelle" komen met
+// kleine letter voor. Alleen de eerste letter omhoog; de rest laten we staan
+// zodat namen als "van der" of "McDonald" niet verminkt worden.
+function normaliseerVoornaam(naam) {
+  if (!naam) return null;
+  const schoon = naam.trim();
+  if (!schoon) return null;
+  return schoon.charAt(0).toUpperCase() + schoon.slice(1);
+}
+
 function mapWebshop(naam) {
   if (!naam) return null;
   return WEBSHOP_ATTRIBUTEN[naam.trim().toLowerCase()] || null;
@@ -186,6 +197,13 @@ async function sendToCustomerIO(order) {
 
   const attributen = { email, plaats: plaats || 'Onbekend' };
   if (webshopAttribuut) attributen[webshopAttribuut] = true;
+
+  // Alleen meesturen als er echt een naam is. Anders zouden we een goede
+  // waarde uit een eerdere bestelling met leeg overschrijven.
+  const voornaam = normaliseerVoornaam(order.voornaam);
+  if (voornaam) attributen.first_name = voornaam;
+
+  attributen.laatste_order_id = order.order_id;
 
   const identifier = encodeURIComponent(email);
   await cioRequest(`/customers/${identifier}`, 'PUT', attributen);
